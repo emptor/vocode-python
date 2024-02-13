@@ -12,6 +12,7 @@ from vocode.streaming.telephony.constants import (
     DEFAULT_AUDIO_ENCODING,
     DEFAULT_SAMPLING_RATE,
 )
+from vocode.streaming.utils.worker import ThreadAsyncWorker
 
 
 class FileWriterWorker(ThreadAsyncWorker):
