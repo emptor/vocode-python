@@ -279,24 +279,31 @@ class StreamingConversation(Generic[OutputDeviceType]):
                 agent_response_message = typing.cast(
                     AgentResponseMessage, agent_response
                 )
+                # Split the message text by "." and process each part
+                message_parts = [
+                    part.strip() + "." if part.strip()[-1] not in ["?", "!"] else part.strip()
+                    for part in agent_response_message.message.text.split('.') if part
+                ]
+                for part in message_parts:
+                    part_message = BaseMessage(text=part)  # Assuming BaseMessage is the correct class for creating a message part
+                    part_agent_response_message = AgentResponseMessage(message=part_message, is_interruptible=item.is_interruptible)
 
-                if self.conversation.filler_audio_worker is not None:
-                    if (
-                        self.conversation.filler_audio_worker.interrupt_current_filler_audio()
-                    ):
-                        await self.conversation.filler_audio_worker.wait_for_filler_audio_to_finish()
+                    # Assuming self.conversation.filler_audio_worker and synthesis logic should be applied per part
+                    if self.conversation.filler_audio_worker is not None:
+                        if self.conversation.filler_audio_worker.interrupt_current_filler_audio():
+                            await self.conversation.filler_audio_worker.wait_for_filler_audio_to_finish()
 
-                self.conversation.logger.debug("Synthesizing speech for message")
-                synthesis_result = await self.conversation.synthesizer.create_speech(
-                    agent_response_message.message,
-                    self.chunk_size,
-                    bot_sentiment=self.conversation.bot_sentiment,
-                )
-                self.produce_interruptible_agent_response_event_nonblocking(
-                    (agent_response_message.message, synthesis_result),
-                    is_interruptible=item.is_interruptible,
-                    agent_response_tracker=item.agent_response_tracker,
-                )
+                    self.conversation.logger.debug("Synthesizing speech for message part")
+                    synthesis_result = await self.conversation.synthesizer.create_speech(
+                        part_agent_response_message.message,
+                        self.chunk_size,
+                        bot_sentiment=self.conversation.bot_sentiment,
+                    )
+                    self.produce_interruptible_agent_response_event_nonblocking(
+                        (part_agent_response_message.message, synthesis_result),
+                        is_interruptible=item.is_interruptible,
+                        agent_response_tracker=item.agent_response_tracker,
+                    )
             except asyncio.CancelledError:
                 pass
 
@@ -506,18 +513,37 @@ class StreamingConversation(Generic[OutputDeviceType]):
             self.events_task = asyncio.create_task(self.events_manager.start())
 
     async def send_initial_message(self, initial_message: BaseMessage):
+        from datetime import datetime
+        # Capture the start time
+        start_time = datetime.now()
         # TODO: configure if initial message is interruptible
         self.transcriber.mute()
-        initial_message_tracker = asyncio.Event()
-        agent_response_event = (
-            self.interruptible_event_factory.create_interruptible_agent_response_event(
-                AgentResponseMessage(message=initial_message),
+        # Log the start time and initial message generation start
+
+        message_parts = [part.strip() + "." for part in initial_message.text.split('.') if part]
+
+        response_events = []
+        message_trackers = []
+        for part in message_parts:
+            initial_message_tracker = asyncio.Event()
+            part_message = BaseMessage(text=part)
+            agent_response_event = self.interruptible_event_factory.create_interruptible_agent_response_event(
+                AgentResponseMessage(message=part_message),
                 is_interruptible=False,
                 agent_response_tracker=initial_message_tracker,
             )
-        )
-        self.agent_responses_worker.consume_nonblocking(agent_response_event)
-        await initial_message_tracker.wait()
+            response_events.append(agent_response_event)
+            message_trackers.append(initial_message_tracker)
+        
+        for agent_response_event in response_events:
+            self.agent_responses_worker.consume_nonblocking(agent_response_event)
+
+        await message_trackers[0].wait()
+        # Calculate the end time and duration
+        end_time = datetime.now()
+        duration = end_time - start_time
+        # Log the end time, duration, and message delivery completion
+        print(f"@@@@ INITIAL MESSAGE DELIVERED @@@@@@ - End Time: {end_time.strftime('%Y-%m-%d %H:%M:%S')}, Duration: {duration.total_seconds()} seconds")
         self.transcriber.unmute()
 
     async def check_for_idle(self):
@@ -559,6 +585,7 @@ class StreamingConversation(Generic[OutputDeviceType]):
 
     def receive_audio(self, chunk: bytes):
         self.transcriber.send_audio(chunk)
+        self.output_device.consume_input_nonblocking(chunk)
 
     def warmup_synthesizer(self):
         self.synthesizer.ready_synthesizer()
