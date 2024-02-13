@@ -1,17 +1,16 @@
 from __future__ import annotations
-
-import asyncio
 import json
 import base64
-from typing import Optional
-
+import wave
+import asyncio
+import numpy as np
+import os
+import audioop  # For μ-law decoding
 from fastapi import WebSocket
-
+from typing import Optional
 from vocode.streaming.output_device.base_output_device import BaseOutputDevice
-from vocode.streaming.telephony.constants import (
-    DEFAULT_AUDIO_ENCODING,
-    DEFAULT_SAMPLING_RATE,
-)
+from vocode.streaming.telephony.constants import DEFAULT_AUDIO_ENCODING
+from vocode.streaming.models.audio_encoding import AudioEncoding
 from vocode.streaming.utils.worker import ThreadAsyncWorker
 
 
