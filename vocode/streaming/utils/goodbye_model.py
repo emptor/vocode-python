@@ -10,14 +10,16 @@ from vocode import getenv
 SIMILARITY_THRESHOLD = 0.9
 EMBEDDING_SIZE = 1536
 GOODBYE_PHRASES = [
-    "bye",
-    "goodbye",
-    "see you",
-    "see you later",
-    "talk to you later",
-    "talk to you soon",
-    "have a good day",
-    "have a good night",
+    "hasta luego",
+    "hasta pronto",
+    "chau",
+    "adios",
+    "chau hasta pronto",
+    "chau un gusto",
+    "un gusto",
+    "mucho gusto",
+    "hasta pronto",
+    "nos vemos",
 ]
 
 
@@ -58,7 +60,7 @@ class GoodbyeModel:
 
     async def is_goodbye(self, text: str) -> bool:
         assert self.goodbye_embeddings is not None, "Embeddings not initialized"
-        if "bye" in text.lower():
+        if "chau" in text.lower():
             return True
         embedding = await self.create_embedding(text.strip().lower())
         similarity_results = embedding @ self.goodbye_embeddings
@@ -73,7 +75,7 @@ class GoodbyeModel:
         if engine:
             params["engine"] = engine
         else:
-            params["model"] = "text-embedding-ada-002"
+            params["model"] = "text-embedding-3-small"
 
         return np.array(
             (await openai.Embedding.acreate(**params))["data"][0]["embedding"]
