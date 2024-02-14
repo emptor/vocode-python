@@ -69,7 +69,6 @@ class GoodbyeModel:
             return True
         embedding = await self.create_embedding(text_no_punctuation.strip())
         similarity_results = embedding @ self.goodbye_embeddings
-        print("LOLLLLLLLLL" + text_no_punctuation + str(np.max(similarity_results)))
         return np.max(similarity_results) > SIMILARITY_THRESHOLD
 
     async def create_embedding(self, text) -> np.ndarray:
