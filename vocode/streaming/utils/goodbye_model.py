@@ -4,10 +4,11 @@ from typing import Optional
 import openai
 import numpy as np
 import requests
+import string
 
 from vocode import getenv
 
-SIMILARITY_THRESHOLD = 0.9
+SIMILARITY_THRESHOLD = 0.84
 EMBEDDING_SIZE = 1536
 GOODBYE_PHRASES = [
     "hasta luego",
@@ -60,10 +61,15 @@ class GoodbyeModel:
 
     async def is_goodbye(self, text: str) -> bool:
         assert self.goodbye_embeddings is not None, "Embeddings not initialized"
-        if "chau" in text.lower():
+        text_no_punctuation = text.translate(
+            str.maketrans("", "", string.punctuation)
+        ).lower()
+
+        if "chau" in text_no_punctuation:
             return True
-        embedding = await self.create_embedding(text.strip().lower())
+        embedding = await self.create_embedding(text_no_punctuation.strip())
         similarity_results = embedding @ self.goodbye_embeddings
+        print("LOLLLLLLLLL" + text_no_punctuation + str(np.max(similarity_results)))
         return np.max(similarity_results) > SIMILARITY_THRESHOLD
 
     async def create_embedding(self, text) -> np.ndarray:
