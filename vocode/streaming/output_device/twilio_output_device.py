@@ -31,17 +31,18 @@ class FileWriterWorker(ThreadAsyncWorker):
         super().terminate()
         self.wav.close()
 
-        
+
 class TwilioOutputDevice(BaseOutputDevice):
     DEFAULT_SAMPLING_RATE = 8000
 
     def __init__(
-        self, ws: Optional[WebSocket] = None, 
+        self,
+        ws: Optional[WebSocket] = None,
         stream_sid: Optional[str] = None,
         call_sid: Optional[str] = None,
         conversation_id: Optional[str] = None,
         sampling_rate: int = DEFAULT_SAMPLING_RATE,
-        audio_encoding: AudioEncoding = DEFAULT_AUDIO_ENCODING
+        audio_encoding: AudioEncoding = DEFAULT_AUDIO_ENCODING,
     ):
         super().__init__(sampling_rate=sampling_rate, audio_encoding=audio_encoding)
         self.ws = ws
@@ -122,9 +123,7 @@ class TwilioOutputDevice(BaseOutputDevice):
 
         chunky = np.max(np.abs(audio_array))
         # Check if the maximum amplitude is below the threshold
-        print(chunky)
-        return chunky == 32510 # 🤷
-
+        return chunky == 32510  # 🤷
 
     def consume_input_nonblocking(self, chunk: bytes):
         if not self.is_silence(chunk):
