@@ -32,27 +32,36 @@ async def stream_input_chunks_and_yield_function_calls(
     gen: AsyncIterable[Union[str, FunctionFragment]],
     get_functions: Literal[True, False] = False,
 ) -> AsyncGenerator[Union[str, FunctionCall], None]:
-    """Used during input streaming to chunk text blocks and set last char to space"""
+    """Used during input streaming to chunk text blocks and set last char to space,
+    ensuring punctuation is not lost but added to the end of the chunked text."""
     splitters = (".", ",", "?", "!", ";", ":", "—", "-", "(", ")", "[", "]", "}", " ")
     buffer = ""
     function_name_buffer = ""
     function_args_buffer = ""
     async for token in gen:
         if isinstance(token, str):
-            if buffer.endswith(splitters):
-                yield buffer if buffer.endswith(" ") else buffer + " "
-                buffer = token
-            elif token.startswith(splitters):
-                output = buffer + token[0]
-                yield output if output.endswith(" ") else output + " "
-                buffer = token[1:]
-            else:
-                buffer += token
+            # Process each character in the token to handle splitters more granularly
+            for char in token:
+                if char in splitters:
+                    if buffer and not buffer.endswith(splitters):
+                        # If buffer does not end with a splitter, yield it with the splitter appended
+                        yield buffer + char + " "
+                        buffer = ""
+                    else:
+                        # If the buffer already ends with a splitter, just append the new splitter
+                        buffer += char
+                else:
+                    buffer += char
         elif isinstance(token, FunctionFragment):
             function_name_buffer += token.name
             function_args_buffer += token.arguments
+
+    # After processing all tokens, check if there's any remaining text to yield
     if buffer != "":
-        yield buffer + " "
+        # Ensure the buffer is yielded with a space at the end if it doesn't end with a splitter
+        yield buffer if buffer.endswith(splitters) else buffer + " "
+
+    # Yield FunctionCall if function information was collected and get_functions is True
     if function_name_buffer and get_functions:
         yield FunctionCall(name=function_name_buffer, arguments=function_args_buffer)
 
@@ -80,9 +89,11 @@ async def collate_response_async(
             possible_list_item = bool(re.match(r"^\d+[ .]", buffer))
             ends_with_money = bool(re.findall(r"\$\d+.$", buffer))
             if re.findall(
-                list_item_ending_pattern
-                if possible_list_item
-                else sentence_endings_pattern,
+                (
+                    list_item_ending_pattern
+                    if possible_list_item
+                    else sentence_endings_pattern
+                ),
                 token,
             ):
                 if not ends_with_money:
@@ -118,12 +129,16 @@ async def openai_get_tokens(gen) -> AsyncGenerator[Union[str, FunctionFragment],
             yield token
         elif "function_call" in delta and delta["function_call"] is not None:
             yield FunctionFragment(
-                name=delta["function_call"]["name"]
-                if "name" in delta["function_call"]
-                else "",
-                arguments=delta["function_call"]["arguments"]
-                if "arguments" in delta["function_call"]
-                else "",
+                name=(
+                    delta["function_call"]["name"]
+                    if "name" in delta["function_call"]
+                    else ""
+                ),
+                arguments=(
+                    delta["function_call"]["arguments"]
+                    if "arguments" in delta["function_call"]
+                    else ""
+                ),
             )
 
 
