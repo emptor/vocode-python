@@ -34,7 +34,11 @@ from vocode.streaming.models.actions import (
 from vocode.streaming.models.agent import (
     AgentConfig,
     ChatGPTAgentConfig,
+    EndInputStream,
+    InputStreamChunk,
+    InputStreamMessage,
     LLMAgentConfig,
+    StartInputStream,
 )
 from vocode.streaming.models.message import BaseMessage
 from vocode.streaming.models.model import BaseModel, TypedModel
@@ -85,6 +89,7 @@ class ActionResultAgentInput(AgentInput, type=AgentInputType.ACTION_RESULT.value
 class AgentResponseType(str, Enum):
     BASE = "agent_response_base"
     MESSAGE = "agent_response_message"
+    MESSAGE_CHUNK = "agent_response_message_chunk"
     STOP = "agent_response_stop"
     FILLER_AUDIO = "agent_response_filler_audio"
 
@@ -95,6 +100,13 @@ class AgentResponse(TypedModel, type=AgentResponseType.BASE.value):
 
 class AgentResponseMessage(AgentResponse, type=AgentResponseType.MESSAGE.value):
     message: BaseMessage
+    is_interruptible: bool = True
+
+
+class AgentResponseMessageChunk(
+    AgentResponse, type=AgentResponseType.MESSAGE_CHUNK.value
+):
+    chunk: InputStreamMessage
     is_interruptible: bool = True
 
 
@@ -140,9 +152,9 @@ class BaseAgent(AbstractAgent[AgentConfigType], InterruptibleWorker):
         interruptible_event_factory: InterruptibleEventFactory = InterruptibleEventFactory(),
         logger: Optional[logging.Logger] = None,
     ):
-        self.input_queue: asyncio.Queue[
-            InterruptibleEvent[AgentInput]
-        ] = asyncio.Queue()
+        self.input_queue: asyncio.Queue[InterruptibleEvent[AgentInput]] = (
+            asyncio.Queue()
+        )
         self.output_queue: asyncio.Queue[
             InterruptibleAgentResponseEvent[AgentResponse]
         ] = asyncio.Queue()
@@ -154,9 +166,9 @@ class BaseAgent(AbstractAgent[AgentConfigType], InterruptibleWorker):
             interruptible_event_factory=interruptible_event_factory,
         )
         self.action_factory = action_factory
-        self.actions_queue: asyncio.Queue[
-            InterruptibleEvent[ActionInput]
-        ] = asyncio.Queue()
+        self.actions_queue: asyncio.Queue[InterruptibleEvent[ActionInput]] = (
+            asyncio.Queue()
+        )
         self.logger = logger or logging.getLogger(__name__)
         self.goodbye_model = None
         if self.agent_config.end_conversation_on_goodbye:
@@ -217,18 +229,34 @@ class RespondAgent(BaseAgent[AgentConfigType]):
         )
         is_first_response = True
         function_call = None
-        async for response, is_interruptible in responses:
+        if self.agent_config.send_text_chunks_to_synthesizer:
+            self.produce_interruptible_agent_response_event_nonblocking(
+                AgentResponseMessageChunk(chunk=StartInputStream()),
+                is_interruptible=self.agent_config.allow_agent_to_be_cut_off,
+            )
+        sent_chunks = 0
+        async for response in responses:
             if isinstance(response, FunctionCall):
                 function_call = response
                 continue
             if is_first_response:
                 agent_span_first.end()
                 is_first_response = False
+            if self.agent_config.send_text_chunks_to_synthesizer:
+                self.produce_interruptible_agent_response_event_nonblocking(
+                    AgentResponseMessageChunk(chunk=InputStreamChunk(text=response)),
+                    is_interruptible=self.agent_config.allow_agent_to_be_cut_off,
+                )
+                sent_chunks += 1
+            else:
+                self.produce_interruptible_agent_response_event_nonblocking(
+                    AgentResponseMessage(message=BaseMessage(text=response)),
+                    is_interruptible=self.agent_config.allow_agent_to_be_cut_off,
+                )
+        if self.agent_config.send_text_chunks_to_synthesizer and sent_chunks > 0:
             self.produce_interruptible_agent_response_event_nonblocking(
-                AgentResponseMessage(message=BaseMessage(text=response)),
-                is_interruptible=self.agent_config.allow_agent_to_be_cut_off
-                and is_interruptible,
-                agent_response_tracker=agent_input.agent_response_tracker,
+                AgentResponseMessageChunk(chunk=EndInputStream()),
+                is_interruptible=self.agent_config.allow_agent_to_be_cut_off,
             )
         # TODO: implement should_stop for generate_responses
         agent_span.end()

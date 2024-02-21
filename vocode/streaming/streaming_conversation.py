@@ -25,11 +25,18 @@ from vocode.streaming.models.transcript import (
 from vocode.streaming.models.message import BaseMessage
 from vocode.streaming.models.transcriber import EndpointingConfig, TranscriberConfig
 from vocode.streaming.output_device.base_output_device import BaseOutputDevice
+from vocode.streaming.synthesizer.eleven_labs_synthesizer import ElevenLabsSynthesizer
 from vocode.streaming.utils.conversation_logger_adapter import wrap_logger
 from vocode.streaming.utils.events_manager import EventsManager
 from vocode.streaming.utils.goodbye_model import GoodbyeModel
 
-from vocode.streaming.models.agent import ChatGPTAgentConfig, FillerAudioConfig
+from vocode.streaming.models.agent import (
+    ChatGPTAgentConfig,
+    EndInputStream,
+    FillerAudioConfig,
+    InputStreamChunk,
+    StartInputStream,
+)
 from vocode.streaming.models.synthesizer import (
     SentimentConfig,
 )
@@ -43,6 +50,7 @@ from vocode.streaming.agent.base_agent import (
     AgentResponse,
     AgentResponseFillerAudio,
     AgentResponseMessage,
+    AgentResponseMessageChunk,
     AgentResponseStop,
     AgentResponseType,
     BaseAgent,
@@ -259,6 +267,47 @@ class StreamingConversation(Generic[OutputDeviceType]):
                     "No filler audio available for synthesizer"
                 )
 
+        async def _run_loop(self):
+            if isinstance(self.conversation.synthesizer, ElevenLabsSynthesizer) and (
+                self.conversation.synthesizer.synthesizer_config.accept_input_chunks
+            ):
+                while True:
+                    item = await self.input_queue.get()
+                    if item.is_interrupted():
+                        continue
+                    self.interruptible_event = item
+                    if isinstance(item.payload, AgentResponseStop):
+                        await self.handle_stop(item)
+                        return
+                    # todo: handle filler audio
+                    # todo: make interruptible
+                    synthesis_result = await self.conversation.synthesizer.create_input_streamed_speech(
+                        self.chunk_size, self.input_queue
+                    )
+                    self.produce_interruptible_agent_response_event_nonblocking(
+                        (BaseMessage(text=""), synthesis_result),
+                        is_interruptible=item.is_interruptible,
+                        agent_response_tracker=item.agent_response_tracker,
+                    )
+                    await item.agent_response_tracker.wait()
+                    # try:
+                    #     await self.current_task
+                    # except asyncio.CancelledError:
+                    #     return
+                    # except Exception as e:
+                    #     logger.exception("InterruptibleWorker", exc_info=True)
+                    # self.interruptible_event.is_interruptible = False
+                    # self.current_task = None
+            else:
+                await super()._run_loop()
+
+        async def handle_stop(
+            self, item: InterruptibleAgentResponseEvent[AgentResponse]
+        ):
+            self.conversation.logger.debug("Agent requested to stop")
+            item.agent_response_tracker.set()
+            await self.conversation.terminate()
+
         async def process(self, item: InterruptibleAgentResponseEvent[AgentResponse]):
             if not self.conversation.synthesis_enabled:
                 self.conversation.logger.debug(
@@ -271,9 +320,7 @@ class StreamingConversation(Generic[OutputDeviceType]):
                     self.send_filler_audio(item.agent_response_tracker)
                     return
                 if isinstance(agent_response, AgentResponseStop):
-                    self.conversation.logger.debug("Agent requested to stop")
-                    item.agent_response_tracker.set()
-                    await self.conversation.terminate()
+                    await self.handle_stop(item)
                     return
 
                 agent_response_message = typing.cast(
@@ -281,23 +328,38 @@ class StreamingConversation(Generic[OutputDeviceType]):
                 )
                 # Split the message text by "." and process each part
                 message_parts = [
-                    part.strip() + "." if part.strip()[-1] not in ["?", "!"] else part.strip()
-                    for part in agent_response_message.message.text.split('.') if part
+                    (
+                        part.strip() + "."
+                        if part.strip()[-1] not in ["?", "!"]
+                        else part.strip()
+                    )
+                    for part in agent_response_message.message.text.split(".")
+                    if part
                 ]
                 for part in message_parts:
-                    part_message = BaseMessage(text=part)  # Assuming BaseMessage is the correct class for creating a message part
-                    part_agent_response_message = AgentResponseMessage(message=part_message, is_interruptible=item.is_interruptible)
+                    part_message = BaseMessage(
+                        text=part
+                    )  # Assuming BaseMessage is the correct class for creating a message part
+                    part_agent_response_message = AgentResponseMessage(
+                        message=part_message, is_interruptible=item.is_interruptible
+                    )
 
                     # Assuming self.conversation.filler_audio_worker and synthesis logic should be applied per part
                     if self.conversation.filler_audio_worker is not None:
-                        if self.conversation.filler_audio_worker.interrupt_current_filler_audio():
+                        if (
+                            self.conversation.filler_audio_worker.interrupt_current_filler_audio()
+                        ):
                             await self.conversation.filler_audio_worker.wait_for_filler_audio_to_finish()
 
-                    self.conversation.logger.debug("Synthesizing speech for message part")
-                    synthesis_result = await self.conversation.synthesizer.create_speech(
-                        part_agent_response_message.message,
-                        self.chunk_size,
-                        bot_sentiment=self.conversation.bot_sentiment,
+                    self.conversation.logger.debug(
+                        "Synthesizing speech for message part"
+                    )
+                    synthesis_result = (
+                        await self.conversation.synthesizer.create_speech(
+                            part_agent_response_message.message,
+                            self.chunk_size,
+                            bot_sentiment=self.conversation.bot_sentiment,
+                        )
                     )
                     self.produce_interruptible_agent_response_event_nonblocking(
                         (part_agent_response_message.message, synthesis_result),
@@ -514,36 +576,42 @@ class StreamingConversation(Generic[OutputDeviceType]):
 
     async def send_initial_message(self, initial_message: BaseMessage):
         from datetime import datetime
+
         # Capture the start time
         start_time = datetime.now()
         # TODO: configure if initial message is interruptible
         self.transcriber.mute()
-        # Log the start time and initial message generation start
-
-        message_parts = [part.strip() + "." for part in initial_message.text.split('.') if part]
-
-        response_events = []
-        message_trackers = []
-        for part in message_parts:
-            initial_message_tracker = asyncio.Event()
-            part_message = BaseMessage(text=part)
-            agent_response_event = self.interruptible_event_factory.create_interruptible_agent_response_event(
-                AgentResponseMessage(message=part_message),
+        initial_message_tracker = asyncio.Event()
+        if self.agent.get_agent_config().send_text_chunks_to_synthesizer:
+            self.logger.debug("Sending initial message as chunks")
+            agent_response_chunk_start = self.interruptible_event_factory.create_interruptible_agent_response_event(
+                AgentResponseMessageChunk(chunk=StartInputStream()),
                 is_interruptible=False,
                 agent_response_tracker=initial_message_tracker,
             )
-            response_events.append(agent_response_event)
-            message_trackers.append(initial_message_tracker)
-        
-        for agent_response_event in response_events:
+            agent_response_chunk_event = self.interruptible_event_factory.create_interruptible_agent_response_event(
+                AgentResponseMessageChunk(
+                    chunk=InputStreamChunk(text=initial_message.text + " "),
+                ),
+                is_interruptible=False,
+            )
+            agent_response_chunk_event_end = self.interruptible_event_factory.create_interruptible_agent_response_event(
+                AgentResponseMessageChunk(chunk=EndInputStream()),
+                is_interruptible=False,
+            )
+            self.agent_responses_worker.consume_nonblocking(agent_response_chunk_start)
+            self.agent_responses_worker.consume_nonblocking(agent_response_chunk_event)
+            self.agent_responses_worker.consume_nonblocking(
+                agent_response_chunk_event_end
+            )
+        else:
+            agent_response_event = self.interruptible_event_factory.create_interruptible_agent_response_event(
+                AgentResponseMessage(message=initial_message),
+                is_interruptible=False,
+                agent_response_tracker=initial_message_tracker,
+            )
             self.agent_responses_worker.consume_nonblocking(agent_response_event)
-
-        await message_trackers[0].wait()
-        # Calculate the end time and duration
-        end_time = datetime.now()
-        duration = end_time - start_time
-        # Log the end time, duration, and message delivery completion
-        print(f"@@@@ INITIAL MESSAGE DELIVERED @@@@@@ - End Time: {end_time.strftime('%Y-%m-%d %H:%M:%S')}, Duration: {duration.total_seconds()} seconds")
+        await initial_message_tracker.wait()
         self.transcriber.unmute()
 
     async def check_for_idle(self):
@@ -650,6 +718,7 @@ class StreamingConversation(Generic[OutputDeviceType]):
         chunk_idx = 0
         seconds_spoken = 0
         async for chunk_result in synthesis_result.chunk_generator:
+            # print("start chunk")
             start_time = time.time()
             speech_length_seconds = seconds_per_chunk * (
                 len(chunk_result.chunk) / chunk_size
@@ -687,11 +756,15 @@ class StreamingConversation(Generic[OutputDeviceType]):
                 transcript_message.text = synthesis_result.get_message_up_to(
                     seconds_spoken
                 )
+            # print("end chunk")
+        # print("done w chunks")
         if self.transcriber.get_transcriber_config().mute_during_speech:
             self.logger.debug("Unmuting transcriber")
             self.transcriber.unmute()
+        # todo: make this work with non-input streaming
         if transcript_message:
-            transcript_message.text = message_sent
+            message_sent = transcript_message.text
+            # transcript_message.text = message_sent
         return message_sent, cut_off
 
     def mark_terminated(self):

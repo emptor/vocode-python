@@ -27,6 +27,36 @@ from vocode.streaming.models.transcript import (
 SENTENCE_ENDINGS = [".", "!", "?", "\n"]
 
 
+# directly from the 11labs SDK but async
+async def stream_input_chunks_and_yield_function_calls(
+    gen: AsyncIterable[Union[str, FunctionFragment]],
+    get_functions: Literal[True, False] = False,
+) -> AsyncGenerator[Union[str, FunctionCall], None]:
+    """Used during input streaming to chunk text blocks and set last char to space"""
+    splitters = (".", ",", "?", "!", ";", ":", "—", "-", "(", ")", "[", "]", "}", " ")
+    buffer = ""
+    function_name_buffer = ""
+    function_args_buffer = ""
+    async for token in gen:
+        if isinstance(token, str):
+            if buffer.endswith(splitters):
+                yield buffer if buffer.endswith(" ") else buffer + " "
+                buffer = token
+            elif token.startswith(splitters):
+                output = buffer + token[0]
+                yield output if output.endswith(" ") else output + " "
+                buffer = token[1:]
+            else:
+                buffer += token
+        elif isinstance(token, FunctionFragment):
+            function_name_buffer += token.name
+            function_args_buffer += token.arguments
+    if buffer != "":
+        yield buffer + " "
+    if function_name_buffer and get_functions:
+        yield FunctionCall(name=function_name_buffer, arguments=function_args_buffer)
+
+
 async def collate_response_async(
     gen: AsyncIterable[Union[str, FunctionFragment]],
     sentence_endings: List[str] = SENTENCE_ENDINGS,

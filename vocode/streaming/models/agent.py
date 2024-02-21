@@ -1,8 +1,8 @@
-from typing import List, Optional, Union
+from typing import Annotated, List, Literal, Optional, Union
 from enum import Enum
 from langchain.prompts import PromptTemplate
 
-from pydantic import validator
+from pydantic import Field, validator
 from vocode.streaming.models.actions import ActionConfig
 
 from vocode.streaming.models.message import BaseMessage
@@ -72,10 +72,32 @@ class AgentConfig(TypedModel, type=AgentType.BASE.value):
     webhook_config: Optional[WebhookConfig] = None
     track_bot_sentiment: bool = False
     actions: Optional[List[ActionConfig]] = None
+    send_text_chunks_to_synthesizer: bool = False
 
 
 class CutOffResponse(BaseModel):
     messages: List[BaseMessage] = [BaseMessage(text="Sorry?")]
+
+
+class StartInputStream(BaseModel):
+    type: Literal["start_input_stream"] = "start_input_stream"
+    pass
+
+
+class InputStreamChunk(BaseModel):
+    type: Literal["input_stream_chunk"] = "input_stream_chunk"
+    text: str
+
+
+class EndInputStream(BaseModel):
+    type: Literal["end_input_stream"] = "end_input_stream"
+    pass
+
+
+InputStreamMessage = Annotated[
+    Union[StartInputStream, InputStreamChunk, EndInputStream],
+    Field(discriminator="type"),
+]
 
 
 class LLMAgentConfig(AgentConfig, type=AgentType.LLM.value):
