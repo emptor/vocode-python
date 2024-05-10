@@ -69,6 +69,7 @@ class GladiaTranscriber(BaseAsyncTranscriber[GladiaTranscriberConfig]):
 
     async def process(self):
         async with websockets.connect(GLADIA_URL) as ws:
+            self.logger(f"Set-up Gladia websocket at {GLADIA_URL}")
             await ws.send(
                 json.dumps(
                     {
