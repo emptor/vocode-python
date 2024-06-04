@@ -1,7 +1,6 @@
 from __future__ import annotations
 import json
 import base64
-import wave
 import asyncio
 import numpy as np
 import os
@@ -12,25 +11,24 @@ from vocode.streaming.output_device.base_output_device import BaseOutputDevice
 from vocode.streaming.telephony.constants import DEFAULT_AUDIO_ENCODING
 from vocode.streaming.models.audio_encoding import AudioEncoding
 from vocode.streaming.utils.worker import ThreadAsyncWorker
-
+import pywebm
 
 class FileWriterWorker(ThreadAsyncWorker):
-    def __init__(self, buffer_queue: asyncio.Queue, wav) -> None:
+    def __init__(self, buffer_queue: asyncio.Queue, webm_writer) -> None:
         super().__init__(buffer_queue)
-        self.wav = wav
+        self.webm_writer = webm_writer
 
     def _run_loop(self):
         while True:
             try:
                 chunk_arr = self.input_janus_queue.sync_q.get()
-                self.wav.writeframes(chunk_arr.tobytes())
+                self.webm_writer.write_audio_frame(chunk_arr.tobytes())
             except asyncio.CancelledError:
                 return
 
     def terminate(self):
         super().terminate()
-        self.wav.close()
-
+        self.webm_writer.close()
 
 class TwilioOutputDevice(BaseOutputDevice):
     DEFAULT_SAMPLING_RATE = 8000
@@ -76,14 +74,11 @@ class TwilioOutputDevice(BaseOutputDevice):
         file_directory = f"/tmp/conversations/{call_sid}"
         if not os.path.exists(file_directory):
             os.makedirs(file_directory)
-        file_path = os.path.join(file_directory, "audio.wav")
-        wav = wave.open(file_path, "wb")
-        wav.setnchannels(1)
-        wav.setsampwidth(2)
-        wav.setframerate(self.sampling_rate)
+        file_path = os.path.join(file_directory, "audio.webm")
+        self.webm_writer = pywebm.WebMOpusWriter(file_path, self.sampling_rate)
 
         # Initialize FileWriterWorker with new file
-        self.thread_worker = FileWriterWorker(self.buffer_queue, wav)
+        self.thread_worker = FileWriterWorker(self.buffer_queue, self.webm_writer)
         self.thread_worker.start()
 
     async def process(self):
